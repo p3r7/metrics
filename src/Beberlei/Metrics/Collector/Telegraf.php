@@ -35,6 +35,9 @@ class Telegraf implements Collector, TaggableCollector, TaggableGaugeableCollect
     /** @var array */
     private $tags;
 
+    /** @var integer */
+    private $mtu;
+
     /**
      * @param string $host
      * @param string $port
@@ -54,6 +57,22 @@ class Telegraf implements Collector, TaggableCollector, TaggableGaugeableCollect
     public function setTags($tags)
     {
         $this->tags = $tags;
+	}
+
+    /**
+     * Set the Maximum Transmission Unit to what is supported by your network.
+     * Here are the values recommended by the original etsy/StatsD documentation:
+     * - 512: Commodity Internet, typically for older intranets or if transiting by the Internet
+     * - 1432: Fast Ethernet, typically valid for most recent intranets
+     * - 8932: Gigabit Ethernet, only for dedicated links with possibility to have jumbo frames
+     *
+     * (from https://github.com/etsy/statsd/blob/master/docs/metric_types.md#multi-metric-packets)
+     *
+     * @param $mtu
+     */
+	public function setMtu($mtu)
+	{
+		$this->mtu = $mtu;
 	}
 
     /**
@@ -121,11 +140,11 @@ class Telegraf implements Collector, TaggableCollector, TaggableGaugeableCollect
             return;
         }
 
-        $level = error_reporting(0);
-        foreach ($this->data as $line) {
-            fwrite($fp, $this->prefix.$line);
+		if (empty($this->mtu)) {
+			$this->sendMetricsUnitarily($fp);
+		} else {
+			$this->sendMetricsInBatches($fp);
         }
-        error_reporting($level);
 
         fclose($fp);
 
@@ -146,4 +165,61 @@ class Telegraf implements Collector, TaggableCollector, TaggableGaugeableCollect
         $tagString = (strlen($tagString) > 0 ? ','.$tagString : $tagString);
 		return $tagString;
     }
+
+    /**
+     * Helper function to append a metrics point to the content
+     * of a UDP packet.
+     *
+     * @param $packet
+     * @param $metric
+     * @return string
+     */
+	protected function buildUdpPacket ($packet, $metric) {
+		if (empty($packet))
+			return $metric;
+		else
+			return $packet . "\n" . $metric;
+	}
+
+    /**
+     * Helper function to send the list of metrics points, each
+     * in one UDP packet.
+     *
+     * @param $fp
+     */
+	protected function sendMetricsUnitarily ($fp) {
+		$level = error_reporting(0);
+		foreach ($this->data as $line) {
+			fwrite($fp, $line);
+		}
+		error_reporting($level);
+	}
+
+    /**
+     * Helper function to send the list of metrics points, using
+     * as few UDP packet as possible with the provided MTU.
+     *
+     * @param $fp
+     */
+	protected function sendMetricsInBatches ($fp) {
+		$packet = '';
+
+		$level = error_reporting(0);
+
+		foreach ($this->data as $line) {
+			$potentialPacket = $this->buildUdpPacket($packet, $line);
+			if (strlen($potentialPacket) > $this->mtu) {
+				fwrite($fp, $packet);
+				$packet = $this->buildUdpPacket('', $line);
+			} else {
+				$packet = $potentialPacket;
+			}
+		}
+
+		if (! empty($packet)) {
+			fwrite($fp, $packet);
+		}
+
+		error_reporting($level);
+	}
 }
